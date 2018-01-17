@@ -84,9 +84,10 @@ import sys, pysam, numpy
 import script_options.standard_parsers as sp
 import script_logging.standard_logging as sl
 import matplotlib.pyplot as plt
+import matplotlib.colors as colors
 import matplotlib.lines as mlines
 import matplotlib.transforms as mtransforms
-#from parsing_routines.gff_gtf_tools import annotation
+from parsing_routines.gff_gtf_tools import annotation
 
 def addScriptOptions(parser, pos_args, kw_args):
     
@@ -235,15 +236,15 @@ def plotLengthDensity(stats_data, gridsize=100):
     
     plt.hexbin(stats_data["aligned_lengths"], stats_data["read_lengths"],
                gridsize=gridsize, xscale="log", yscale="log", bins="log",
-               cmap=plt.get_cmap("Greens"))
+               cmap="Greens")
     
     axes = plt.gca()
     mins = [axes.get_xlim()[0], axes.get_ylim()[0]]
     maxs = [axes.get_xlim()[1], axes.get_ylim()[1]]
     plt.plot([min(mins),min(maxs)],[min(mins),min(maxs)], color="black")
     
-    cbar = plt.colorbar(shrink=0.2)
-    cbar.set_label('# of reads', rotation=270)
+    cbar = plt.colorbar(shrink=0.4)
+    cbar.set_label('# of reads', rotation=270, labelpad=15)
     plt.xlabel("aligned length (bp)")
     plt.ylabel("read length (bp)")
     
@@ -276,7 +277,154 @@ def plotSkipLengthHist(stats_data, binwidth=20, alpha=1.0):
     
     return(fig)
 
+def annotCount(annot_filename, bam_filename, feature="genes", annot_fmt="gff3"):
+    
+    """ count the number of reads mapping to each feature """
+    
+    # load annotation
+    print "loading annotation..."
+    annot = annotation(annot_filename, filetype=annot_fmt)
+    annot.set_feature(feature)
+    afeats = annot.get_selection()
+    
+    print "counting reads..."
+    # pointer to the bam file (again)
+    thisbam = pysam.AlignmentFile(bam_filename, "rb")
+    
+    def getRevReads(bamfile, chrid, start, stop):
+        
+        """ Make a generator object that returns only rev strand reads"""
+        
+        return(read for read in bamfile.fetch(chrid, start, stop) if read.is_reverse)
+    
+    def getFwdReads(bamfile, chrid, start, stop):
+        
+        """ Make a generator object that returns only rev strand reads"""
+        
+        return(read for read in bamfile.fetch(chrid, start, stop) if not read.is_reverse)
+    
+    counts = numpy.zeros(len(afeats),
+                         dtype=[("name","|S20"),("count","int"),("frac_read_coverage","float")])
+    
+    i=0
+    for afeat in afeats:
+        if afeat.strand=="+":
+            reads = getFwdReads(thisbam, afeat.chrid, afeat.start, afeat.stop)
+        elif afeat.strand=="-":
+            reads = getRevReads(thisbam, afeat.chrid, afeat.start, afeat.stop)
+        
+        count=0
+        bases_covered=0
+        for read in reads:
+            count+=1
+            start = afeat.start
+            stop = afeat.stop
+            if read.reference_start>start:
+                start = read.reference_start
+            if read.reference_end<stop:
+                stop = read.reference_end
+            bases_covered = bases_covered+(stop-start)
+        
+        if count>0:
+            mean_coverage = float(bases_covered)/(afeat.stop-afeat.start)
+            frac_coverage = float(mean_coverage)/count
+                    
+        counts["name"][i] = afeat.desc["gene_id"]
+        counts["count"][i] = count
+        counts["frac_read_coverage"][i] = frac_coverage
+        
+        i+=1
+        if i%500 == 0:
+            print i
+    
+    return(counts)
 
+def plotAnnotCountvCov(counts, log=True, bins=50, feature_label="genes"):
+    
+    """plots the counts vs the fractional coverage for a dataset
+    
+    uses output from annotCount. 
+    """
+    
+    fig = plt.figure(figsize=(12,8))
+    
+    ind = numpy.where(counts["count"]>0)[0]
+    xscale="linear"
+    if log:
+        xscale="log"
+    
+    plt.hexbin(counts["count"][ind], counts["frac_read_coverage"][ind],
+               gridsize=bins, bins="log", xscale=xscale, marginals=False, cmap='Greens')
+    cbar = plt.colorbar(shrink=0.4)
+    cbar.set_label('# of %s' % feature_label, rotation=270, labelpad=15)
+     
+    plt.ylabel(r"mean fractional read coverage")
+    plt.xlabel(r"read counts")
+    
+    return(fig)
+     
+def plotAnnotCountScatter(counts1, counts2, c1label="", c2label="",
+                          log=True, xylog=True, bins=50, feature_label="genes"):
+    
+    """plots the read counts for two datasets for the same annotation
+    
+    uses output from annotCount. Make sure the same annotation was used
+    to generate both sets of counts - that way things will all be in the right order
+    """
+    
+    fig = plt.figure(figsize=(10,8))
+    xscale="linear"
+    yscale="linear"
+    x=counts1["count"]
+    y=counts2["count"]
+    if xylog:
+        ind1 = counts1["count"]>0
+        ind2 = counts2["count"]>0
+        ind=ind1*ind2
+        x=counts1["count"][ind]
+        y=counts2["count"][ind]        
+        xscale="log"
+        yscale="log"
+            
+    plt.hexbin(x, y, gridsize=bins, bins="log", xscale=xscale, 
+               yscale=yscale, marginals=False,cmap='Greens')
+    
+    axes = plt.gca()
+    mins = [axes.get_xlim()[0], axes.get_ylim()[0]]
+    maxs = [axes.get_xlim()[1], axes.get_ylim()[1]]
+    plt.plot([min(mins),min(maxs)*2],[min(mins),min(maxs)*2], color="black")
+
+    cbar = plt.colorbar(shrink=0.4)
+    cbar.set_label('# of %s' % feature_label, rotation=270, labelpad=15)
+     
+    plt.ylabel(r"%s read counts" % c1label)
+    plt.xlabel(r"%s read counts" % c2label)
+    
+    return(fig)
+
+def plotAnnotCovScatter(counts1, counts2, c1label="", c2label="",
+                        log=True, bins=50, feature_label="genes"):
+    
+    """plots the fractional read coverage for two datasets for the same annotation
+    
+    uses output from annotCount. Make sure the same annotation was used
+    to generate both sets of counts - that way things will all be in the right order
+    """
+    
+    fig = plt.figure(figsize=(10,8))
+        
+    plt.hexbin(counts1["frac_read_coverage"], counts2["frac_read_coverage"],
+               gridsize=bins, bins="log", xscale="linear", marginals=False,
+               cmap='Greens')
+    plt.plot([0,1],[0,1], color="black")
+    cbar = plt.colorbar(shrink=0.4)
+    cbar.set_label('# of %s' % feature_label, rotation=270, labelpad=15)
+     
+    plt.ylabel(r"%s mean fractional read coverage" % c1label)
+    plt.xlabel(r"%s mean fractional read coverage" % c2label)
+    
+    return(fig)
+  
 
 if __name__ == '__main__':
 
